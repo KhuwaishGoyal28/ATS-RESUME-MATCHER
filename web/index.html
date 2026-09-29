@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ATS Resume Matcher</title>
+<meta name="description" content="Check how well a resume matches a job description using keyword matching and TF-IDF cosine similarity — runs fully in your browser.">
+<style>
+:root{--bg:#0a0c12;--card:#12151f;--ink:#ece9e1;--mute:#8b90a0;--line:rgba(236,233,225,.12);--amber:#ffb454;--teal:#5eead4;--bad:#ff7a7a}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 system-ui,Segoe UI,Roboto,sans-serif}
+main{max-width:820px;margin:0 auto;padding:48px 20px 80px}
+h1{font:600 clamp(2rem,6vw,3.2rem)/1.05 Georgia,serif;margin:0 0 8px}h1 em{color:var(--amber)}
+.sub{color:var(--mute);margin:0 0 30px}
+label{display:block;font:600 .8rem ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase;color:var(--amber);margin:22px 0 8px}
+textarea,input[type=file]{width:100%;background:var(--card);border:1px solid var(--line);color:var(--ink);border-radius:12px;padding:14px;font:inherit}
+textarea{min-height:150px;resize:vertical}
+button{margin-top:22px;background:var(--amber);color:#1a1205;border:0;border-radius:99px;padding:14px 28px;font:700 1rem inherit;cursor:pointer}
+button:hover{filter:brightness(1.08)}
+.res{margin-top:34px;padding:26px;border:1px solid var(--line);border-radius:18px;background:var(--card)}
+.big{font:600 4rem/1 Georgia,serif}.big small{font-size:1.4rem;color:var(--mute)}
+.bar{height:8px;border-radius:99px;background:var(--line);overflow:hidden;margin:14px 0 22px}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--amber),var(--teal));transition:width .8s}
+.row{display:flex;gap:28px;flex-wrap:wrap;color:var(--mute)}.row b{color:var(--ink)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.chips span{border:1px solid var(--line);border-radius:99px;padding:3px 12px;font:.8rem ui-monospace,monospace}
+.chips .miss{border-color:rgba(255,122,122,.5);color:var(--bad)}.chips .hit{border-color:rgba(94,234,212,.5);color:var(--teal)}
+.err{color:var(--bad);margin-top:14px}.note{color:var(--mute);font-size:.85rem;margin-top:26px}
+a{color:var(--amber)}
+</style>
+</head>
+<body>
+<main>
+  <h1>ATS Resume <em>Matcher</em></h1>
+  <p class="sub">Upload a resume (PDF, DOCX or TXT) and paste a job description to see the match score. Everything runs in your browser — nothing is uploaded.</p>
+  <form id="f">
+    <label for="r">Resume</label>
+    <input type="file" id="r" accept=".pdf,.docx,.txt" required>
+    <label for="jd">Job description</label>
+    <textarea id="jd" placeholder="Paste the job description here…" required></textarea>
+    <button type="submit">Check match</button>
+    <div class="err" id="err" role="alert"></div>
+  </form>
+  <section class="res" id="out" hidden aria-live="polite">
+    <div class="big"><span id="final">0</span><small>% match</small></div>
+    <div class="bar"><i id="barfill" style="width:0"></i></div>
+    <div class="row"><span>Keyword score <b id="kw"></b></span><span>TF-IDF score <b id="tf"></b></span></div>
+    <label>Matched skills</label><div class="chips" id="hit"></div>
+    <label>Missing skills</label><div class="chips" id="miss"></div>
+  </section>
+  <p class="note">Scoring: 50% keyword match (with synonyms) + 50% TF-IDF cosine similarity. Ported from the original FastAPI/Streamlit version in <a href="https://github.com/KhuwaishGoyal28/ATS-RESUME-MATCHER">this repo</a>.</p>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<script>
+const SYN={"rest api":["api","restapi","rest apis"],"ci/cd":["ci cd","continuous integration","continuous deployment"],"mlops":["machine learning ops","ml ops"],"deep learning":["dl"],"computer vision":["cv"],"data visualization":["visualization","data viz"]};
+const TERMS=["java","python","c++","sql","nosql","aws","azure","gcp","docker","kubernetes","rest api","microservices","ci/cd","machine learning","deep learning","nlp","pytorch","tensorflow","data structures","algorithms","system design"];
+const BS=String.fromCharCode(92),esc=s=>[...s].map(c=>('.*+?^${}()|[]'+BS).includes(c)?BS+c:c).join('');
+const clean=t=>t.toLowerCase().replace(/[^a-z0-9+/.\s]/g,' ').replace(/\s+/g,' ').trim();
+const has=(text,w)=>new RegExp('(?<![a-z0-9_])'+esc(w)+'(?![a-z0-9_])').test(text);
+function tfidf(a,b){ // sklearn defaults: token \b\w\w+\b, smooth idf, l2 norm
+  const tok=t=>t.match(/\b\w\w+\b/g)||[];const A=tok(a),B=tok(b);
+  const vocab=[...new Set([...A,...B])];const df={};
+  vocab.forEach(w=>df[w]=(A.includes(w)?1:0)+(B.includes(w)?1:0));
+  const vec=T=>{const tf={};T.forEach(w=>tf[w]=(tf[w]||0)+1);const v=vocab.map(w=>(tf[w]||0)*(Math.log(3/(1+df[w]))+1));const n=Math.hypot(...v)||1;return v.map(x=>x/n)};
+  const va=vec(A),vb=vec(B);return va.reduce((s,x,i)=>s+x*vb[i],0)*100;
+}
+function analyze(resume,jd){
+  const r=clean(resume),j=clean(jd);
+  const kws=TERMS.filter(t=>j.includes(t));
+  const hit=kws.filter(s=>has(r,s)||(SYN[s]||[]).some(y=>has(r,y)));
+  const miss=kws.filter(s=>!has(r,s));
+  const kw=kws.length?hit.length/kws.length*100:0, tf=tfidf(r,j);
+  return{kw,tf,final:.5*kw+.5*tf,hit,miss:kws.filter(s=>!hit.includes(s))};
+}
+async function readFile(f){
+  const n=f.name.toLowerCase();
+  if(n.endsWith('.txt'))return f.text();
+  const buf=await f.arrayBuffer();
+  if(n.endsWith('.docx'))return(await mammoth.extractRawText({arrayBuffer:buf})).value;
+  if(n.endsWith('.pdf')){pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise;let t='';
+    for(let i=1;i<=pdf.numPages;i++){t+=(await(await pdf.getPage(i)).getTextContent()).items.map(x=>x.str).join(' ')+' '}return t}
+  throw new Error('Unsupported file type. Use PDF, DOCX or TXT.');
+}
+const $=id=>document.getElementById(id),chips=(el,a,c)=>el.innerHTML=a.length?a.map(x=>`<span class="${c}">${x}</span>`).join(''):'<span>None 🎉</span>';
+$('f').addEventListener('submit',async e=>{
+  e.preventDefault();$('err').textContent='';
+  try{
+    const text=await readFile($('r').files[0]);
+    if(text.trim().length<20)throw new Error('Could not read any text from this file.');
+    const x=analyze(text,$('jd').value);
+    $('out').hidden=false;$('final').textContent=x.final.toFixed(1);$('kw').textContent=x.kw.toFixed(1)+'%';$('tf').textContent=x.tf.toFixed(1)+'%';
+    requestAnimationFrame(()=>$('barfill').style.width=Math.min(100,x.final)+'%');
+    chips($('hit'),x.hit,'hit');chips($('miss'),x.miss,'miss');$('out').scrollIntoView({behavior:'smooth'});
+  }catch(err){$('err').textContent='❌ '+err.message}
+});
+</script>
+</body>
+</html>
